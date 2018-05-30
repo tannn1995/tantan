@@ -1,0 +1,252 @@
+#!/bin/bash
+
+tput reset
+
+# "1" is online; "0" is offline
+NETWORK="0"
+# Set up local location
+# Set up download directory
+DOWNLOAD_DIR="172.29.143.228/yocto/downloads/"
+SRC_DIR="git@172.29.143.231:OS-Solution"
+# Set up work directory
+WORK_DIR=`pwd`
+# Set up number of logical CPUs
+NUM=`grep -c ^processor /proc/cpuinfo`
+# Set up gcc version
+gccversion="poky-gcc"
+val=0
+ptest=0
+multilib=0
+SOC_NAME=0
+BUILD_ENV="mmp-default"
+# Module config for build off line
+add_config_for_download(){
+    if [ $1 -eq 0 ] ; then
+        echo "SOURCE_MIRROR_URL ?= \"http://${DOWNLOAD_DIR}\"" >> conf/local.conf
+        echo "INHERIT += \"own-mirrors\"" >> conf/local.conf
+        echo "CONNECTIVITY_CHECK_URIS=\"\"" >> conf/local.conf
+        cur_dir=`pwd`
+        cd ../poky
+        check_apply_workaround_patch=`git log --author=Khang`
+        if [ "X${check_apply_workaround_patch}" == "X" ] ; then
+            git am /shsv/RCarSW/rvc_git_repo/yocto/patches-for-workaground/0001-gitsm-Work-around-to-build-offline-for-YP-2.4.patch
+        fi
+        sed -i 's|git:|gitsm:|g' ../meta-renesas/meta-rcar-gen3/recipes-multimedia/gstreamer/*bbappend
+        sed -i 's|git:|gitsm:|g' ../meta-renesas/meta-rcar-gen3/recipes-multimedia/avb-applications/*.inc
+        cd $cur_dir
+    fi
+}
+
+# Module config for Graphic-MMP package
+conf_mmp_full () {
+    BUILD_ENV_copy_conf=$1
+    BOARD_NAME_copy_conf=$2
+    FEATURE_LIST="v4l2-renderer h263dec_lib h264enc_lib h265dec_lib mpeg2dec_lib
+      mpeg4dec_lib vc1dec_lib divxdec_lib rvdec_lib alacdec_lib flacdec_lib
+      aacpv2dec_lib aacpv2dec_mdw mp3dec_lib mp3dec_mdw wmadec_lib wmadec_mdw
+      aaclcenc_lib aaclcenc_mdw vp8dec_lib vp8enc_lib cmsbcm cmsblc cmsdgc
+      dvd adsp avb iccom"
+
+    # DTV is invalid in e3
+    if [[ $BOARD_NAME_conf_mmp != "e3" ]]; then FEATURE_LIST+=" dtv"; fi
+    
+    # VP9 is enable in m3n, e3
+    if [[ $BOARD_NAME_conf_mmp == "e3" ]] || [[ $BOARD_NAME_conf_mmp == "m3n" ]]
+      then FEATURE_LIST+=" vp9dec_lib"; fi
+    
+    # Enable distro features
+    for feature in $FEATURE_LIST; do
+      sed -i "/#DISTRO_FEATURES_append = \" ${feature}\"/c DISTRO_FEATURES_append = \" ${feature}\"" ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+    done
+
+    # Enable USB3.0
+    sed -i '/#MACHINE_FEATURES_append = " usb3"/c MACHINE_FEATURES_append = " usb3"' ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+
+    # m3n uses salvator-x conf which include machine feature cas
+    # CAS is invalid in m3n
+    if [[ $BOARD_NAME_conf_mmp == "m3n" ]]
+        then sed -i '/MACHINE_FEATURES_append = " cas"/c #MACHINE_FEATURES_append = " cas"' ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf; fi
+}
+
+# Module config for speedup-build
+add_faster_build_config() {
+    if [ $1 -ne 0 ]; then
+        if [ $1 -lt 20 ]; then
+            echo "BB_NUMBER_THREADS = \"${1}\"" >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+            echo "PARALLEL_MAKE = \"-j ${1}\"" >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+            echo "BB_NUMBER_PARSE_THREADS = \"${1}\"" >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+        else
+            echo "BB_NUMBER_THREADS = \"${NUM}\"" >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+            echo "PARALLEL_MAKE = \"-j ${NUM}\"" >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+            echo "BB_NUMBER_PARSE_THREADS = \"${NUM}\"" >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+        fi
+    fi
+}
+
+# Module config for add valgrind package
+add_valgrind(){
+    if [ $1 -eq 1 ] ; then
+        check_apply_workaround_patch=`grep -c "IMAGE_INSTALL_append = \" valgrind\"" ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf`
+        if [ "${check_apply_workaround_patch}" == "0" ] ; then
+            echo "EXTRA_IMAGE_FEATURES = \"debug-tweaks dbg-pkgs dev-pkgs ptest-pkgs tools-profile\""  >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+            echo "IMAGE_INSTALL_append = \" valgrind\""  >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+        fi
+    fi
+}
+
+# Module config for add ptest package
+add_ptest(){
+    if [ $1 -eq 1 ] ; then
+        check_apply_workaround_patch=`grep -c "DISTRO_FEATURES_append = \" ptest\"" ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf`
+        if [ "${check_apply_workaround_patch}" == "0" ] ; then
+            echo "DISTRO_FEATURES_append = \" ptest\""  >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+            echo "EXTRA_IMAGE_FEATURES += \"ptest-pkgs\""  >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+        fi
+    fi
+}
+
+# Module config for add multilib
+add_multilib(){
+    if [ $1 -eq 1 ] ; then
+        check_apply_workaround_patch=`grep -c "lib32" ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf`
+        if [ "${check_apply_workaround_patch}" == "0" ] ; then
+            echo "EXTRA_IMAGE_FEATURES = require conf/multilib.conf"  >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+            echo "MULTILIBS = \"multilib:lib32\""  >> conf/local.conf
+            echo "DEFAULTTUNE_virtclass-multilib-lib32 = \"armv7ahf\""  >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+            echo "IMAGE_INSTALL_append = \" lib32-glibc lib32-libgcc lib32-libstdc++\"" >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+        fi
+    fi
+}
+
+# Module to explain board name from machine name and soc name
+show_board_name() {
+    if [ ${1} = "salvator-x" -a ${2} = "r8a7795" ]; then
+        sh_board="h3"
+    elif [ ${1} = "salvator-x" -a ${2} = "r8a7796" ]; then
+        sh_board="m3"
+    elif [ ${1} = "salvator-x" -a ${2} = "r8a77965" ]; then
+        sh_board="m3n"
+    elif [ ${1} = "m3ulcb" ]; then
+        sh_board="m3ulcb"
+    elif [ ${1} = "h3ulcb" ]; then
+        sh_board="h3ulcb"
+    elif [ ${1} = "ebisu" ]; then
+        sh_board="e3"
+    elif [ ${1} = "draak" ]; then
+        sh_board="d3"
+    fi
+    echo ${sh_board}
+}
+
+while getopts 'hm:s:g:e:b:u:-:' arg; 
+do
+    case $arg in
+        -)
+            case "${OPTARG}" in
+                enable-valgrind)
+                    val=1
+                    ;;
+                enable-ptest)
+                    ptest=1
+                    ;;
+                enable-multilib)
+                    multilib=1
+                    ;;
+                enable-speedup-build)
+                    NUM="${!OPTIND}"
+                    ;;
+            esac;;
+        m)
+            MACHINE_NAME="$OPTARG"
+            ;;
+        s)
+            SOC_NAME="$OPTARG"
+            ;;
+        g)
+            GCC_VERSION="$OPTARG"
+            ;;
+        e)
+            BUILD_ENV="$OPTARG" 
+            ;;
+        b)
+            BINARIES_DIR="$OPTARG" 
+            ;;
+        h | *)
+            cat ${WORK_DIR}/yocto-repo/script/README.txt >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Main function
+BOARD_NAME=$(show_board_name $MACHINE_NAME $SOC_NAME)
+echo
+echo
+echo "/ ============================ Build for $BOARD_NAME $BUILD_ENV config ============================ /"
+echo "Copyscript for R-Car Gen3"
+# Build environment
+CONF_NAME="local-wayland"
+if [[ ${BUILD_ENV} == "mmp-full" ]]
+    then COPY_ENV="mmp"
+elif [[ ${BUILD_ENV} == "mmp-default" ]]
+    then COPY_ENV="mmp"
+elif [[ ${BUILD_ENV} == "gfx" ]]
+    then COPY_ENV="gfx-only"
+elif [[ ${BUILD_ENV} == "bsp-wayland" ]]
+    then COPY_ENV="bsp"
+else COPY_ENV="bsp"; CONF_NAME="local"; 
+fi
+
+if [ -n $BINARIES_DIR ]; then
+    if [ ${BUILD_ENV} = "mmp-full" -o ${BUILD_ENV} = "mmp-default" -o ${BUILD_ENV} = "gfx" ]; then
+        cd ${WORK_DIR}/meta-renesas
+        sh meta-rcar-gen3/docs/sample/copyscript/copy_proprietary_softwares.sh ${BINARIES_DIR}
+        cd ..
+    fi
+fi
+
+if [ ! -d ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV} ] ; then
+    mkdir ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}
+fi
+
+if [ -n $GCC_VERSION ]; then
+    if [ ${GCC_VERSION} = "linarogcc" ]; then
+        gccversion="linaro-gcc"
+    else
+        gccversion="poky-gcc"
+    fi
+else 
+    gccversion="poky-gcc"
+fi
+source ${WORK_DIR}/poky/oe-init-build-env ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}
+
+cp ${WORK_DIR}/meta-renesas/meta-rcar-gen3/docs/sample/conf/${MACHINE_NAME}/${gccversion}/${COPY_ENV}/${CONF_NAME}.conf \
+    ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+cp ${WORK_DIR}/meta-renesas/meta-rcar-gen3/docs/sample/conf/${MACHINE_NAME}/${gccversion}/${COPY_ENV}/bblayers.conf \
+    ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/bblayers.conf
+
+if [ ${SOC_NAME} = "r8a7796" ] ; then
+    sed -i '/SOC_FAMILY/d' ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf 
+    echo "SOC_FAMILY = \"r8a7796\"" >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+fi
+if [ ${SOC_NAME} = "r8a77965" ] ; then
+    sed -i '/SOC_FAMILY/d' ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+    echo "SOC_FAMILY = \"r8a77965\"" >> ${WORK_DIR}/build-${BOARD_NAME}-${BUILD_ENV}/conf/local.conf
+fi
+
+if [ ${BUILD_ENV} = "mmp-full" ]; then
+    conf_mmp_full $BUILD_ENV $BOARD_NAME
+fi
+
+add_config_for_download 0
+
+if [ -n $NUM ]; then
+    add_faster_build_config $NUM
+else 
+    add_faster_build_config $NUM
+fi
+
+add_valgrind $val
+add_ptest $ptest
+add_multilib $multilib
+
